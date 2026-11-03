@@ -259,13 +259,33 @@ class FallTemplateBot2026(ForecastBot):
     _max_concurrent_questions = (
         1  # Set this to whatever works for your search-provider/ai-model rate limits
     )
-    _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
+    # Made per event loop by _research_limiter().
+    _research_limiter_loop: asyncio.AbstractEventLoop | None = None
+    _research_limiter_semaphore: asyncio.Semaphore | None = None
     _structure_output_validation_samples = 2
 
     ##################################### RESEARCH #####################################
 
+    @classmethod
+    def _research_limiter(cls) -> asyncio.Semaphore:
+        """
+        Caps how many questions are researched at once.
+
+        main.py calls asyncio.run() once per tournament (FutureEval, then
+        MiniBench). A semaphore that made a task wait in one event loop raises
+        "bound to a different event loop" when a task waits on it in the next
+        one. The research cap used to be one semaphore shared by the whole
+        class, so every MiniBench question that had to wait its turn for
+        research would fail. Each event loop now gets its own.
+        """
+        loop = asyncio.get_running_loop()
+        if cls._research_limiter_semaphore is None or cls._research_limiter_loop is not loop:
+            cls._research_limiter_loop = loop
+            cls._research_limiter_semaphore = asyncio.Semaphore(cls._max_concurrent_questions)
+        return cls._research_limiter_semaphore
+
     async def run_research(self, question: MetaculusQuestion) -> str:
-        async with self._concurrency_limiter:
+        async with self._research_limiter():
             researcher = self.get_llm("researcher")
             prompt = self._get_research_prompt(question, researcher)
             try:
