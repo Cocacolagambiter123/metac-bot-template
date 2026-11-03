@@ -6,10 +6,19 @@ tournaments (group questions are split into their subquestions, as the live
 bot does), this asks the helper model to match it to a known series, runs the
 checks in numeric_model/matching.py, and prints what was decided.
 
+Metaculus withholds the description, resolution criteria, fine print and
+resolution of closed questions an account didn't forecast (its API gateway
+rules, documented in Metaculus PR #5261). So matching here works on titles,
+units and ranges alone, with the live check for missing criteria turned off.
+That makes it a harder test than live use, where open questions come with
+their full text.
+
 For accepted matches it also shows:
 - the text the forecasting prompt would get,
 - the model's forecast made with data up to the day before the question
-  opened (so no later data leaks in) next to the actual resolution,
+  opened (so no later data leaks in) next to what actually happened,
+  read from the series itself (for an exact-source match, that is how the
+  question resolved),
 - a dry run of the bot's real blending code on the real question, with a
   stand-in AI forecast, to check that the blend is accepted.
 
@@ -34,8 +43,8 @@ import asyncio
 import logging
 import os
 import sys
-from collections import Counter
-from datetime import datetime, timedelta, timezone
+from collections import Counter, defaultdict
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +61,7 @@ from forecasting_tools import (  # noqa: E402
 from forecasting_tools.helpers.metaculus_client import ApiFilter  # noqa: E402
 
 from main import FallTemplateBot2026, pick_models, question_info  # noqa: E402
+from numeric_model.data_sources import fetch_fred  # noqa: E402
 from numeric_model.matching import MatchResult, anchor_text, match_question  # noqa: E402
 
 # Questions whose right answer is known, keyed by words in the title. These
@@ -128,30 +138,38 @@ def resolution_value(resolution: str | None) -> float | None:
         return None  # e.g. "above_upper_bound" or "annulled"
 
 
-class Resolutions:
+def realized_outcome(result: MatchResult) -> float | None:
     """
-    Looks up resolutions. Question lists from the API can leave them out, so
-    each post is fetched on its own, once.
+    What actually happened, in the question's units, read from the series
+    itself. None if the series hasn't published the end date yet.
     """
+    assert result.proposal is not None
+    proposal = result.proposal
+    series = fetch_fred(proposal.series_id)  # cached: the full history
+    if series.last_date < proposal.end_date:
+        return None
 
-    def __init__(self, client: MetaculusClient) -> None:
-        self.client = client
-        self.by_question: dict[int | None, str | None] = {}
-        self.fetched_posts: set[int | None] = set()
+    def value_on(day: date) -> float:
+        index = int(np.searchsorted(series.dates, np.datetime64(day, "D"), side="right")) - 1
+        return float(series.values[index])
 
-    def get(self, question: NumericQuestion) -> str | None:
-        if question.resolution_string is not None:
-            return question.resolution_string
-        post = question.id_of_post
-        if post is not None and post not in self.fetched_posts:
-            self.fetched_posts.add(post)
-            try:
-                found = self.client.get_question_by_post_id(post, group_question_mode="unpack_subquestions")
-                for q in found if isinstance(found, list) else [found]:
-                    self.by_question[q.id_of_question] = q.resolution_string
-            except Exception as error:
-                print(f"Couldn't fetch the resolution of post {post}: {error}")
-        return self.by_question.get(question.id_of_question)
+    if proposal.quantity == "value":
+        value = value_on(proposal.end_date)
+    elif proposal.quantity in ("max", "min"):
+        start = (
+            np.datetime64(proposal.window_start, "D")
+            if proposal.window_start and not proposal.all_time
+            else series.dates[0]
+        )
+        window = series.values[(series.dates >= start) & (series.dates <= np.datetime64(proposal.end_date, "D"))]
+        value = float(window.max() if proposal.quantity == "max" else window.min())
+    else:
+        assert proposal.reference_date is not None
+        start_value, end_value = value_on(proposal.reference_date), value_on(proposal.end_date)
+        if proposal.quantity == "pct_change":
+            return (end_value / start_value - 1.0) * 100.0
+        value = end_value - start_value
+    return value * proposal.scale
 
 
 async def main() -> int:
@@ -193,16 +211,18 @@ async def main() -> int:
         # Data only up to the day before the question opened: that day's
         # close may not have been known yet.
         as_of = opened.date() - timedelta(days=1)
-        return await match_question(question_info(question), helper.invoke, as_of=as_of)
+        return await match_question(
+            question_info(question), helper.invoke, as_of=as_of, require_criteria=False
+        )
 
     results = await asyncio.gather(*(check(q) for q in questions), return_exceptions=True)
-    resolutions = Resolutions(client)
 
     accepted_lines: list[str] = []
     rejected_lines: list[str] = []
     reject_reasons: Counter[str] = Counter()
     wrong_accepts = blend_failures = errors = 0
     pits: list[float] = []
+    pits_by_series: dict[str, list[float]] = defaultdict(list)
     by_series: Counter[str] = Counter()
     for question, result in zip(questions, results):
         title = question.question_text
@@ -226,20 +246,28 @@ async def main() -> int:
             wrong_accepts += 1
             lines.append(f"       <-- WRONG: should be rejected ({why_reject})")
         lines.append(f"       {'; '.join(result.reasons)}")
+        criteria = " ".join((question.resolution_criteria or "").split())
+        if criteria:
+            lines.append(f"       resolves on: {criteria[:240]}{'...' if len(criteria) > 240 else ''}")
+        else:
+            lines.append("       resolves on: (not available: matched on the title alone)")
         lines.append(
             f"       unit {question.unit_of_measure!r}; range {question.lower_bound:,.4g} to "
             f"{question.upper_bound:,.4g}; opened {question.open_time:%Y-%m-%d}"
             if question.open_time else f"       unit {question.unit_of_measure!r}"
         )
         lines += ["       | " + line for line in anchor_text(result, question.unit_of_measure or "").splitlines()]
-        resolution = resolutions.get(question)
-        value = resolution_value(resolution)
+        value = resolution_value(question.resolution_string)
+        source = "resolved"
+        if value is None:
+            value, source = realized_outcome(result), f"{result.proposal.series_id} was"
         if value is not None:
             pit = float(np.mean(result.scaled_samples <= value))
             pits.append(pit)
-            lines.append(f"       resolved {value:,.4g}: the model's {pit:.0%} percentile")
+            pits_by_series[result.proposal.series_id].append(pit)
+            lines.append(f"       {source} {value:,.4g}: the model's {pit:.0%} percentile")
         else:
-            lines.append(f"       resolved {resolution!r}")
+            lines.append("       outcome not published yet")
         try:
             ok, text = dry_run_blend(bot, question, result)
         except Exception as error:
@@ -259,13 +287,25 @@ async def main() -> int:
         f"{wrong_accepts} accepted that should have been rejected; "
         f"{blend_failures} blend failures; {errors} errors.",
     ]
+    with_criteria = sum(1 for q in questions if (q.resolution_criteria or "").strip())
+    summary.append(
+        f"{with_criteria} of {len(questions)} questions came with resolution criteria "
+        "(Metaculus withholds them for closed questions this account didn't forecast), "
+        "so the rest were matched on titles alone."
+    )
     if pits:
-        pit_array = np.array(pits)
+        def coverage(values: list[float]) -> str:
+            array = np.array(values)
+            inside80 = np.mean((array >= 0.1) & (array <= 0.9))
+            inside90 = np.mean((array >= 0.05) & (array <= 0.95))
+            return f"{inside80:.0%} inside the 80% range, {inside90:.0%} inside the 90% range"
+
         summary.append(
-            f"Out-of-sample check on {len(pits)} resolved matches: "
-            f"{np.mean((pit_array >= 0.1) & (pit_array <= 0.9)):.0%} inside the 80% range, "
-            f"{np.mean((pit_array >= 0.05) & (pit_array <= 0.95)):.0%} inside the 90% range."
+            f"Out-of-sample check on {len(pits)} matches with a known outcome "
+            f"(data up to the day before each question opened): {coverage(pits)}."
         )
+        for series_id, values in sorted(pits_by_series.items()):
+            summary.append(f"  {series_id}: {len(values)} questions, {coverage(values)}")
     summary.append(
         f"Group subquestions: {len(groups)}, of which {len(unlabelled)} have a title "
         f"that doesn't contain their label"

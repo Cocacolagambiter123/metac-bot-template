@@ -258,11 +258,19 @@ def verify_match(
     as_of: date,
     fetch: Callable[[str], Series] = fetch_fred,
     n_paths: int = 5000,
+    require_criteria: bool = True,
 ) -> MatchResult:
     """
     Checks a proposed match. `as_of` is the date the forecast is made: today
     in live use, or the question's open date when testing on closed questions
     (the series is then cut off at that date, so nothing later leaks in).
+
+    Without resolution criteria there is no way to check that the question
+    resolves on the series itself rather than a similar source, so such
+    questions are rejected. Metaculus only withholds the criteria of closed
+    questions an account hasn't forecast, so this doesn't affect live
+    forecasting; the check on closed questions turns it off with
+    `require_criteria=False` and matches on titles alone.
     """
     result = MatchResult(accepted=False, proposal=proposal)
     reject = result.reasons.append
@@ -270,6 +278,9 @@ def verify_match(
     known = KNOWN_SERIES.get(proposal.series_id)
     if known is None:
         reject(f"{proposal.series_id!r} is not a known series")
+        return result
+    if require_criteria and not question.resolution_criteria.strip():
+        reject("the question came without resolution criteria, so its source can't be checked")
         return result
     if proposal.source_match != "exact":
         reject(f"the question resolves on a proxy for {proposal.series_id}, not the series itself")
@@ -432,6 +443,7 @@ async def match_question(
     ask: Callable[[str], "object"],
     as_of: date,
     fetch: Callable[[str], Series] = fetch_fred,
+    require_criteria: bool = True,
 ) -> MatchResult:
     """
     Runs the whole match: asks the AI (`ask` is an async function taking a
@@ -446,4 +458,6 @@ async def match_question(
     if proposal is None:
         return MatchResult(accepted=False, reasons=["the question isn't about a known series"])
     # Downloading and simulating take a few seconds, so keep them off the event loop.
-    return await asyncio.to_thread(verify_match, question, proposal, as_of, fetch)
+    return await asyncio.to_thread(
+        verify_match, question, proposal, as_of, fetch, 5000, require_criteria
+    )

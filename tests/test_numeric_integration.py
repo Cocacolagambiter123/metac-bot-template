@@ -201,6 +201,14 @@ class VerifyMatchTest(unittest.TestCase):
         self.assert_rejected(verify(sp500_question(), sp500_proposal(quantity="max", window_start=date(2027, 1, 5))), "starts after")
         self.assert_rejected(verify(sp500_question(unit_of_measure="%"), sp500_proposal(quantity="pct_change")), "reference date")
 
+    def test_rejects_questions_without_resolution_criteria(self) -> None:
+        # Without criteria the source can't be checked (e.g. EIA or AAA gas prices).
+        question = sp500_question(resolution_criteria="")
+        self.assert_rejected(verify(question, sp500_proposal()), "without resolution criteria")
+        # The closed-question check turns this off and matches on titles alone.
+        result = verify_match(question, sp500_proposal(), TODAY, fetch=fake_fetch, n_paths=500, require_criteria=False)
+        self.assertTrue(result.accepted, result.reasons)
+
     def test_rejects_wrong_units(self) -> None:
         self.assert_rejected(verify(sp500_question(unit_of_measure="USD"), sp500_proposal()), "doesn't fit")
 
