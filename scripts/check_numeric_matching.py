@@ -8,8 +8,8 @@ checks in numeric_model/matching.py, and prints what was decided.
 
 For accepted matches it also shows:
 - the text the forecasting prompt would get,
-- the model's forecast made with data up to the day the question opened (so
-  no later data leaks in) next to the actual resolution,
+- the model's forecast made with data up to the day before the question
+  opened (so no later data leaks in) next to the actual resolution,
 - a dry run of the bot's real blending code on the real question, with a
   stand-in AI forecast, to check that the blend is accepted.
 
@@ -35,7 +35,7 @@ import logging
 import os
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -121,11 +121,37 @@ def dry_run_blend(bot: FallTemplateBot2026, question: NumericQuestion, match: Ma
     return True, f"blend OK at weight {os.environ['NUMERIC_MODEL_WEIGHT']}: blended median {median:,.4g}"
 
 
-def resolution_value(question: NumericQuestion) -> float | None:
+def resolution_value(resolution: str | None) -> float | None:
     try:
-        return float(question.resolution_string) if question.resolution_string is not None else None
+        return float(resolution) if resolution is not None else None
     except ValueError:
         return None  # e.g. "above_upper_bound" or "annulled"
+
+
+class Resolutions:
+    """
+    Looks up resolutions. Question lists from the API can leave them out, so
+    each post is fetched on its own, once.
+    """
+
+    def __init__(self, client: MetaculusClient) -> None:
+        self.client = client
+        self.by_question: dict[int | None, str | None] = {}
+        self.fetched_posts: set[int | None] = set()
+
+    def get(self, question: NumericQuestion) -> str | None:
+        if question.resolution_string is not None:
+            return question.resolution_string
+        post = question.id_of_post
+        if post is not None and post not in self.fetched_posts:
+            self.fetched_posts.add(post)
+            try:
+                found = self.client.get_question_by_post_id(post, group_question_mode="unpack_subquestions")
+                for q in found if isinstance(found, list) else [found]:
+                    self.by_question[q.id_of_question] = q.resolution_string
+            except Exception as error:
+                print(f"Couldn't fetch the resolution of post {post}: {error}")
+        return self.by_question.get(question.id_of_question)
 
 
 async def main() -> int:
@@ -164,9 +190,13 @@ async def main() -> int:
 
     async def check(question: NumericQuestion) -> MatchResult:
         opened = question.open_time or question.published_time or datetime.now(timezone.utc)
-        return await match_question(question_info(question), helper.invoke, as_of=opened.date())
+        # Data only up to the day before the question opened: that day's
+        # close may not have been known yet.
+        as_of = opened.date() - timedelta(days=1)
+        return await match_question(question_info(question), helper.invoke, as_of=as_of)
 
     results = await asyncio.gather(*(check(q) for q in questions), return_exceptions=True)
+    resolutions = Resolutions(client)
 
     accepted_lines: list[str] = []
     rejected_lines: list[str] = []
@@ -202,13 +232,14 @@ async def main() -> int:
             if question.open_time else f"       unit {question.unit_of_measure!r}"
         )
         lines += ["       | " + line for line in anchor_text(result, question.unit_of_measure or "").splitlines()]
-        value = resolution_value(question)
+        resolution = resolutions.get(question)
+        value = resolution_value(resolution)
         if value is not None:
             pit = float(np.mean(result.scaled_samples <= value))
             pits.append(pit)
             lines.append(f"       resolved {value:,.4g}: the model's {pit:.0%} percentile")
         else:
-            lines.append(f"       resolved {question.resolution_string!r}")
+            lines.append(f"       resolved {resolution!r}")
         try:
             ok, text = dry_run_blend(bot, question, result)
         except Exception as error:

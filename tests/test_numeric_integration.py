@@ -147,6 +147,11 @@ class UnitsCompatibleTest(unittest.TestCase):
         self.assertTrue(units_compatible("percent", "change", 100.0, "basis points"))
         self.assertTrue(units_compatible("index points", "pct_change", 1.0, "%"))
         self.assertTrue(units_compatible("index points", "value", 1.0, ""))
+        # Yield and spread levels are often written in percentage or basis points.
+        self.assertTrue(units_compatible("percent", "value", 1.0, "pp"))
+        self.assertTrue(units_compatible("percent", "value", 1.0, "percentage points"))
+        self.assertTrue(units_compatible("percent", "value", 100.0, "bps"))
+        self.assertTrue(units_compatible("index points", "value", 1.0, "Points"))
 
     def test_mismatched_units(self) -> None:
         # Dollars read as cents, or the other way round, is the classic unit error.
@@ -157,6 +162,10 @@ class UnitsCompatibleTest(unittest.TestCase):
         self.assertFalse(units_compatible("index points", "pct_change", 1.0, "points"))
         self.assertFalse(units_compatible("percent", "change", 1.0, "basis points"))
         self.assertFalse(units_compatible("index points", "value", 100.0, ""))
+        # Whole words only: "pp" is not "ppm", and "cent" is not "century".
+        self.assertFalse(units_compatible("percent", "value", 1.0, "ppm"))
+        self.assertFalse(units_compatible("US dollars per gallon", "value", 100.0, "century"))
+        self.assertFalse(units_compatible("percent", "value", 1.0, "bps"))
 
 
 class VerifyMatchTest(unittest.TestCase):
@@ -207,6 +216,18 @@ class VerifyMatchTest(unittest.TestCase):
         )
         proposal = sp500_proposal(series_id="GASREGW", end_date=date(2026, 12, 28))
         self.assert_rejected(verify(question, proposal), "far outside")
+
+    def test_rejects_a_change_question_proposed_as_a_level(self) -> None:
+        # "pp" fits a yield level, so the unit check passes; the question's
+        # range (a change around zero) is what catches the mistake.
+        question = sp500_question(
+            title="By how much will the 10-year Treasury yield change between November 2 and December 31, 2026?",
+            resolution_criteria="The change in the 10-year yield (FRED DGS10).",
+            unit_of_measure="pp",
+            lower_bound=-1.0,
+            upper_bound=1.0,
+        )
+        self.assert_rejected(verify(question, sp500_proposal(series_id="DGS10")), "far outside")
 
     def test_rejects_stale_or_missing_data(self) -> None:
         old = synthetic_series("SP500", 6800.0, 0.01, end=TODAY - timedelta(days=40))

@@ -197,25 +197,37 @@ _UNSUPPORTED_WORDS = ("intraday", "intra-day", "during the trading day", "tick")
 
 # For each series unit: words that may appear in the question's unit, by the
 # scale between them. An empty question unit is allowed only at scale 1.
+_PERCENT = ("%", "percent", "percentage", "percentage point", "pp")
+_BASIS_POINTS = ("basis point", "bp")
 _UNIT_WORDS: dict[str, dict[float, tuple[str, ...]]] = {
-    "index points": {1.0: ("point", "index", "level", "value", "pts")},
-    "percent": {1.0: ("%", "percent")},
+    "index points": {1.0: ("point", "index", "level", "value", "pt")},
+    # A yield or spread of 4.2% is also written "4.2 pp", or "420 bp".
+    "percent": {1.0: _PERCENT, 100.0: _BASIS_POINTS},
     "US dollars per barrel": {1.0: ("$", "usd", "dollar")},
     "US dollars per gallon": {1.0: ("$", "usd", "dollar"), 100.0: ("cent", "¢")},
     "US dollars": {1.0: ("$", "usd", "dollar"), 100.0: ("cent", "¢")},
     "yen": {1.0: ("yen", "¥", "jpy")},
 }
 # Changes in a percent series are in percentage points, or basis points at 100.
-_PERCENT_CHANGE_WORDS: dict[float, tuple[str, ...]] = {
-    1.0: ("percentage point", "pp", "%", "percent"),
-    100.0: ("basis point", "bp"),
-}
+_PERCENT_CHANGE_WORDS: dict[float, tuple[str, ...]] = {1.0: _PERCENT, 100.0: _BASIS_POINTS}
+
+
+def _unit_has(unit: str, word: str) -> bool:
+    """
+    Whether the question's unit contains `word`. Symbols such as "$" and "%"
+    can appear anywhere; words must be whole words, optionally plural, so
+    "pp" matches "pp" but not "ppm", and "cent" matches "cents" but not
+    "century".
+    """
+    if not word[0].isalpha():
+        return word in unit
+    return re.search(rf"(?<![a-z]){re.escape(word)}s?(?![a-z])", unit) is not None
 
 
 def units_compatible(series_units: str, quantity: str, scale: float, question_unit: str) -> bool:
     unit = question_unit.strip().lower()
     if quantity == "pct_change":
-        return scale == 1.0 and any(w in unit for w in ("%", "percent"))
+        return scale == 1.0 and any(_unit_has(unit, w) for w in ("%", "percent", "percentage"))
     if not unit:
         return scale == 1.0
     if quantity == "change" and series_units == "percent":
@@ -225,7 +237,7 @@ def units_compatible(series_units: str, quantity: str, scale: float, question_un
     words = table.get(scale)
     if not words:
         return False
-    if any(w in unit for w in words):
+    if any(_unit_has(unit, w) for w in words):
         # "%" alone must not pass for a dollar series, and a "per barrel"
         # question must not match a "per gallon" series.
         if "barrel" in series_units and "gallon" in unit:
