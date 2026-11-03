@@ -7,6 +7,8 @@
 - **Choosing tournaments:** the repository variable `BOT_TOURNAMENTS` takes a comma-separated list of tournament IDs or slugs. If it's empty, the bot uses the current FutureEval season and MiniBench.
 - **Reliability:** the bot keeps at most 4 AI requests in flight at once (`MAX_CONCURRENT_AI_CALLS`), because new Claude Console accounts reject requests beyond a small limit. If news research fails, the bot still forecasts. If any question fails, the run is marked as failed in the Actions tab, with a plain message when a spending limit or the credits ran out. Every prompt states the Metaculus convention that a question was undecided when it opened.
 
+- **Numeric model (in progress, not used by the bot yet):** `numeric_model/` forecasts questions about published data series (stock indices, the VIX, Treasury yields, oil, exchange rates, fuel prices) by simulating thousands of future paths from each series' FRED history. `numeric_model/BACKTEST.md` shows how well calibrated it is over the last 20 years. Run `python scripts/backtest_numeric_model.py` to regenerate it and `python -m unittest discover -s tests` for the tests.
+
 **Secrets** (Settings → Secrets and variables → Actions → Secrets): `METACULUS_TOKEN`, `ANTHROPIC_API_KEY`, `ASKNEWS_API_KEY`.
 **Variables** (same page, Variables tab): `RUN_TOURNAMENT_BOT`, `RUN_CUP_BOT`, `BOT_TOURNAMENTS`, `FORECAST_MODEL`, `FORECAST_EFFORT`, `HELPER_MODEL`, `MAX_CONCURRENT_AI_CALLS`, all optional.
 
