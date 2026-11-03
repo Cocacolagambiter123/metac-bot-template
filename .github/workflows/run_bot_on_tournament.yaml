@@ -56,3 +56,4 @@ jobs:
           MAX_CONCURRENT_AI_CALLS: ${{ vars.MAX_CONCURRENT_AI_CALLS }} # default 4; raise it as your AI account's limits grow
           USE_NUMERIC_MODEL: ${{ vars.USE_NUMERIC_MODEL }} # "true" to use the numeric model; off by default
           NUMERIC_MODEL_WEIGHT: ${{ vars.NUMERIC_MODEL_WEIGHT }} # 0 (default) = prompt anchor only; up to 1 = blend
+          USE_SIMILAR_QUESTIONS: ${{ vars.USE_SIMILAR_QUESTIONS }} # "true" to add similar resolved questions to the research; off by default

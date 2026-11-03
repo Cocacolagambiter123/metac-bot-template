@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: "What to run: forecasts on the bot-testing-area, or the numeric model's matching check on closed questions (submits nothing)"
+        description: "What to run: forecasts on the bot-testing-area, or a check on closed questions of the numeric model's matching or the similar-question lookup (checks submit nothing)"
         type: choice
         options:
           - test_questions
           - numeric_matching_check
+          - similar_questions_check
         default: test_questions
       use_numeric_model:
         description: "Use the numeric model in this run (overrides the USE_NUMERIC_MODEL variable for this run only)"
@@ -22,8 +23,16 @@ on:
         description: "Numeric model blend weight from 0 to 1 for this run (blank uses NUMERIC_MODEL_WEIGHT)"
         type: string
         default: ""
+      use_similar_questions:
+        description: "Add similar resolved questions to the research in this run (overrides the USE_SIMILAR_QUESTIONS variable for this run only)"
+        type: choice
+        options:
+          - repository variable
+          - "true"
+          - "false"
+        default: repository variable
       tournaments:
-        description: "For numeric_matching_check: comma-separated tournament IDs or slugs (blank = this season's FutureEval and MiniBench)"
+        description: "For the checks: comma-separated tournament IDs or slugs (blank = this season's FutureEval and MiniBench)"
         type: string
         default: ""
 
@@ -53,7 +62,7 @@ jobs:
       - name: Run unit tests
         run: uv run python -m unittest discover -s tests
       - name: Run bot
-        if: inputs.task != 'numeric_matching_check'
+        if: inputs.task == 'test_questions' || inputs.task == ''
         run: |
           uv run python main.py --mode test_questions
         # this reads the environment variables from the github repository.
@@ -76,6 +85,7 @@ jobs:
           # Numeric model (off unless USE_NUMERIC_MODEL is "true"); the run's inputs override the variables.
           USE_NUMERIC_MODEL: ${{ inputs.use_numeric_model != 'repository variable' && inputs.use_numeric_model || vars.USE_NUMERIC_MODEL }}
           NUMERIC_MODEL_WEIGHT: ${{ inputs.numeric_model_weight || vars.NUMERIC_MODEL_WEIGHT }} # 0 (default) = prompt anchor only
+          USE_SIMILAR_QUESTIONS: ${{ inputs.use_similar_questions != 'repository variable' && inputs.use_similar_questions || vars.USE_SIMILAR_QUESTIONS }}
       - name: Check numeric model matching on closed questions
         if: inputs.task == 'numeric_matching_check'
         run: uv run python scripts/check_numeric_matching.py --tournaments "$CHECK_TOURNAMENTS"
@@ -98,3 +108,27 @@ jobs:
           # Numeric model (off unless USE_NUMERIC_MODEL is "true"); the run's inputs override the variables.
           USE_NUMERIC_MODEL: ${{ inputs.use_numeric_model != 'repository variable' && inputs.use_numeric_model || vars.USE_NUMERIC_MODEL }}
           NUMERIC_MODEL_WEIGHT: ${{ inputs.numeric_model_weight || vars.NUMERIC_MODEL_WEIGHT }} # 0 (default) = prompt anchor only
+          USE_SIMILAR_QUESTIONS: ${{ inputs.use_similar_questions != 'repository variable' && inputs.use_similar_questions || vars.USE_SIMILAR_QUESTIONS }}
+      - name: Check the similar-question lookup on closed questions
+        if: inputs.task == 'similar_questions_check'
+        run: uv run python scripts/check_similar_questions.py --tournaments "$CHECK_TOURNAMENTS"
+        env:
+          CHECK_TOURNAMENTS: ${{ inputs.tournaments }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          # Optional settings, stored as repository variables (not secrets):
+          FORECAST_MODEL: ${{ vars.FORECAST_MODEL }} # e.g. "anthropic/claude-fable-5-1"
+          HELPER_MODEL: ${{ vars.HELPER_MODEL }}
+          FORECAST_EFFORT: ${{ vars.FORECAST_EFFORT }} # low, medium, high (default), xhigh or max
+          MAX_CONCURRENT_AI_CALLS: ${{ vars.MAX_CONCURRENT_AI_CALLS }} # default 4; raise it as your AI account's limits grow
+          # Numeric model (off unless USE_NUMERIC_MODEL is "true"); the run's inputs override the variables.
+          USE_NUMERIC_MODEL: ${{ inputs.use_numeric_model != 'repository variable' && inputs.use_numeric_model || vars.USE_NUMERIC_MODEL }}
+          NUMERIC_MODEL_WEIGHT: ${{ inputs.numeric_model_weight || vars.NUMERIC_MODEL_WEIGHT }} # 0 (default) = prompt anchor only
+          USE_SIMILAR_QUESTIONS: ${{ inputs.use_similar_questions != 'repository variable' && inputs.use_similar_questions || vars.USE_SIMILAR_QUESTIONS }}

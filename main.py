@@ -48,12 +48,23 @@ from forecasting_tools import (
     structure_output,
 )
 
+from forecasting_tools.data_models.questions import (
+    CanceledResolution,
+    OutOfBoundsResolution,
+)
+from forecasting_tools.helpers.metaculus_client import ApiFilter
 from numeric_model.blend import blend_cdfs
 from numeric_model.matching import (
     MatchResult,
     QuestionInfo,
     anchor_text,
     match_question,
+)
+from similar_questions import (
+    PastQuestion,
+    TargetQuestion,
+    find_similar_questions,
+    format_for_prompt,
 )
 
 dotenv.load_dotenv()
@@ -235,6 +246,131 @@ def question_info(question: NumericQuestion) -> QuestionInfo:
     )
 
 
+def similar_questions_enabled() -> bool:
+    """
+    Whether to add similar questions that have already resolved on Metaculus
+    to the research (see similar_questions.py). Set USE_SIMILAR_QUESTIONS to
+    "true" to turn it on; it is off by default until it has been validated.
+    """
+    return os.getenv("USE_SIMILAR_QUESTIONS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def target_question(question: MetaculusQuestion) -> TargetQuestion:
+    return TargetQuestion(
+        title=question.question_text,
+        resolution_criteria=question.resolution_criteria or "",
+        question_id=question.id_of_question,
+        group_option=question.group_question_option or "",
+    )
+
+
+def describe_resolution(question: MetaculusQuestion) -> tuple[str, bool | None] | None:
+    """
+    How a question resolved, in words, and for yes/no questions whether it
+    was Yes. None if it was annulled or its resolution can't be read.
+    """
+    try:
+        resolution = question.typed_resolution
+    except Exception:
+        return None
+    if resolution is None or isinstance(resolution, CanceledResolution):
+        return None
+    if isinstance(resolution, bool):
+        return ("Yes" if resolution else "No"), resolution
+    unit = getattr(question, "unit_of_measure", None) or ""
+    if isinstance(resolution, OutOfBoundsResolution):
+        if isinstance(question, NumericQuestion):
+            bound = question.upper_bound if resolution == OutOfBoundsResolution.ABOVE_UPPER_BOUND else question.lower_bound
+            side = "above" if resolution == OutOfBoundsResolution.ABOVE_UPPER_BOUND else "below"
+            return f"{side} the question's range ({side} {bound:,.4g} {unit})".replace(" )", ")"), None
+        return resolution.value.replace("_", " "), None
+    if isinstance(resolution, datetime):
+        return resolution.date().isoformat(), None
+    if isinstance(resolution, float):
+        return f"{resolution:,.4g} {unit}".strip(), None
+    return str(resolution), None
+
+
+def past_question(question: MetaculusQuestion) -> PastQuestion | None:
+    """
+    A resolved question for similar_questions.py. Question lists from the API
+    can leave the resolution out; it is then None and looked up later. None
+    if the question can't be used (annulled, or a conditional question).
+    """
+    if isinstance(question, ConditionalQuestion):
+        return None
+    try:
+        kind = question.get_api_type_name()
+    except Exception:
+        return None
+    title = question.question_text
+    label = question.group_question_option
+    if label and label.lower() not in title.lower():
+        title = f"{title} ({label})"
+    resolution: str | None = None
+    resolved_yes: bool | None = None
+    if question.resolution_string is not None:
+        described = describe_resolution(question)
+        if described is None:
+            return None
+        resolution, resolved_yes = described
+    when = question.actual_resolution_time or question.scheduled_resolution_time
+    return PastQuestion(
+        title=title,
+        url=question.page_url or "",
+        question_type=kind,
+        resolution=resolution,
+        resolved_on=when.date() if when else None,
+        post_id=question.id_of_post,
+        question_id=question.id_of_question,
+        resolved_yes=resolved_yes,
+    )
+
+
+def _search_resolved_blocking(query: str, limit: int) -> list[MetaculusQuestion]:
+    # forecasting-tools makes blocking web requests, so this runs in a thread
+    # with its own event loop, leaving the bot's loop free for other questions.
+    return asyncio.run(
+        MetaculusClient().get_questions_matching_filter(
+            ApiFilter(
+                allowed_types=["binary", "numeric", "discrete", "multiple_choice", "date"],
+                allowed_statuses=["resolved"],
+                group_question_mode="unpack_subquestions",
+                other_url_parameters={
+                    "search": query,
+                    "limit": limit,
+                    # Forecast histories aren't needed and make replies much bigger.
+                    "with_cp": "false",
+                    "include_conditional_cps": "false",
+                },
+            ),
+            num_questions=limit,
+            error_if_question_target_missed=False,
+        )
+    )
+
+
+async def search_resolved_questions(query: str, limit: int = 20) -> list[PastQuestion]:
+    """Resolved Metaculus questions matching a search phrase."""
+    found = await asyncio.to_thread(_search_resolved_blocking, query, limit)
+    return [p for p in (past_question(q) for q in found) if p is not None]
+
+
+async def resolve_past_question(past: PastQuestion) -> PastQuestion | None:
+    """Fetches a question on its own to get the resolution a question list left out."""
+    if past.resolution is not None:
+        return past
+    if past.post_id is None:
+        return None
+    found = await asyncio.to_thread(
+        MetaculusClient().get_question_by_post_id, past.post_id, "unpack_subquestions"
+    )
+    for question in found if isinstance(found, list) else [found]:
+        if question.id_of_question == past.question_id and question.resolution_string is not None:
+            return past_question(question)
+    return None
+
+
 class FallTemplateBot2026(ForecastBot):
     """
     This is the template bot for the Fall 2026 FutureEval Bot Tournament.
@@ -355,8 +491,38 @@ class FallTemplateBot2026(ForecastBot):
                     f"forecast without news research. Error: {error}"
                 )
                 research = ""
+            if similar_questions_enabled():
+                research = await self._add_similar_questions(question, research)
             logger.info(f"Found Research for URL {question.page_url}:\n{research}")
             return research
+
+    async def _add_similar_questions(
+        self, question: MetaculusQuestion, research: str
+    ) -> str:
+        """
+        Adds questions like this one that have already resolved to the
+        research (see similar_questions.py). Never costs the question.
+        """
+        try:
+            similar = await find_similar_questions(
+                target_question(question),
+                self.get_llm("parser", "llm").invoke,
+                search_resolved_questions,
+                resolve_past_question,
+                as_of=datetime.now(timezone.utc).date(),
+            )
+        except Exception as error:
+            logger.warning(
+                f"Similar-question lookup failed for URL {question.page_url}: {error}"
+            )
+            return research
+        logger.info(
+            f"Found {len(similar)} similar resolved questions for URL {question.page_url}"
+        )
+        if not similar:
+            return research
+        section = format_for_prompt(similar)
+        return f"{research}\n\n{section}" if research.strip() else section
 
     async def summarize_research(
         self, question: MetaculusQuestion, research: str
@@ -1046,6 +1212,8 @@ if __name__ == "__main__":
     run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
 
     check_environment(strict=True)
+    if similar_questions_enabled():
+        print("🔎  Similar resolved questions are added to each question's research.\n")
     use_numeric_model, numeric_model_weight = numeric_model_settings()
     if use_numeric_model:
         print(
