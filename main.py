@@ -50,6 +50,40 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class ThrottledLlm(GeneralLlm):
+    """
+    A GeneralLlm that caps how many AI requests are in flight at once.
+
+    The bot forecasts every open question at the same time, 5 times each, so it
+    can send dozens of requests at once. New Claude Console accounts allow only
+    a few concurrent requests and reject the rest with a rate-limit error (2 of
+    50 forecasts failed this way in the first test run). Every ThrottledLlm
+    shares one cap, because the provider counts requests across all models.
+    Set MAX_CONCURRENT_AI_CALLS to change it (default 4).
+    """
+
+    _limiter_loop: asyncio.AbstractEventLoop | None = None
+    _limiter: asyncio.Semaphore | None = None
+
+    @classmethod
+    def _get_limiter(cls) -> asyncio.Semaphore:
+        # The script calls asyncio.run() once per tournament, and a semaphore
+        # can't be shared between event loops, so make one per loop.
+        loop = asyncio.get_running_loop()
+        if cls._limiter is None or cls._limiter_loop is not loop:
+            raw = os.getenv("MAX_CONCURRENT_AI_CALLS", "").strip()
+            limit = int(raw) if raw.isdigit() and int(raw) > 0 else 4
+            cls._limiter_loop = loop
+            cls._limiter = asyncio.Semaphore(limit)
+        return cls._limiter
+
+    async def _mockable_direct_call_to_model(self, prompt):  # type: ignore[override]
+        # Wraps each single API call, so a slot is freed while a failed call
+        # waits to be retried.
+        async with self._get_limiter():
+            return await super()._mockable_direct_call_to_model(prompt)
+
+
 def pick_models() -> dict[str, str | GeneralLlm]:
     """
     Choose the AI models based on which API key is set.
@@ -104,14 +138,14 @@ def pick_models() -> dict[str, str | GeneralLlm]:
     }.get(effort, (16000, 600))
 
     # Current Claude models reject the `temperature` setting, so none is sent.
-    forecaster = GeneralLlm(
+    forecaster = ThrottledLlm(
         model=forecast_model,
         reasoning_effort=effort,
         max_tokens=max_tokens,
         timeout=timeout_seconds,
         allowed_tries=3,
     )
-    helper = GeneralLlm(
+    helper = ThrottledLlm(
         model=helper_model,
         max_tokens=8000,
         timeout=180,
@@ -246,6 +280,15 @@ class FallTemplateBot2026(ForecastBot):
                 research = ""
             logger.info(f"Found Research for URL {question.page_url}:\n{research}")
             return research
+
+    async def summarize_research(
+        self, question: MetaculusQuestion, research: str
+    ) -> str:
+        if not research.strip():
+            # Nothing to summarise. Asking the model anyway makes it post a
+            # confused "the research didn't come through" reply in the comment.
+            return "No news research was used for this forecast."
+        return await super().summarize_research(question, research)
 
     async def _call_researcher(
         self, researcher: str | GeneralLlm, prompt: str

@@ -45,3 +45,4 @@ jobs:
           FORECAST_MODEL: ${{ vars.FORECAST_MODEL }} # e.g. "anthropic/claude-fable-5-1"
           HELPER_MODEL: ${{ vars.HELPER_MODEL }}
           FORECAST_EFFORT: ${{ vars.FORECAST_EFFORT }} # low, medium, high (default), xhigh or max
+          MAX_CONCURRENT_AI_CALLS: ${{ vars.MAX_CONCURRENT_AI_CALLS }} # default 4; raise it as your AI account's limits grow
