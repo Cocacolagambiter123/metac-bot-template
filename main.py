@@ -63,7 +63,9 @@ def pick_models() -> dict[str, str | GeneralLlm]:
     5.5) handles the side tasks: turning answers into numbers and summarising.
 
     Set FORECAST_MODEL or HELPER_MODEL (litellm model names, e.g.
-    "anthropic/claude-sonnet-5-5") to override either choice without editing code.
+    "anthropic/claude-fable-5-1") to override either choice without editing code,
+    and FORECAST_EFFORT (low, medium, high, xhigh or max) to change how hard the
+    forecasting model thinks.
     """
     if has_real_env("ANTHROPIC_API_KEY"):
         forecast_model = "anthropic/claude-opus-5-5"
@@ -83,13 +85,30 @@ def pick_models() -> dict[str, str | GeneralLlm]:
         )
         sys.exit(1)
 
+    # Reasoning effort is "high" unless FORECAST_EFFORT says otherwise.
+    # Metaculus found high-reasoning versions beat standard ones; there is no
+    # published evidence yet that "xhigh" or "max" beat "high", and they cost
+    # more and take longer.
+    effort = os.getenv("FORECAST_EFFORT", "").strip().lower() or "high"
+    if effort not in ("low", "medium", "high", "xhigh", "max"):
+        print(
+            "❌  FORECAST_EFFORT must be low, medium, high, xhigh or max "
+            f"(got {effort!r})."
+        )
+        sys.exit(1)
+    # Thinking counts towards max_tokens, and higher effort thinks for longer,
+    # so give it more room and more time.
+    max_tokens, timeout_seconds = {
+        "xhigh": (32000, 1200),
+        "max": (48000, 1800),
+    }.get(effort, (16000, 600))
+
     # Current Claude models reject the `temperature` setting, so none is sent.
-    # Thinking counts towards max_tokens, so leave plenty of room for it.
     forecaster = GeneralLlm(
         model=forecast_model,
-        reasoning_effort="high",
-        max_tokens=16000,
-        timeout=600,
+        reasoning_effort=effort,
+        max_tokens=max_tokens,
+        timeout=timeout_seconds,
         allowed_tries=3,
     )
     helper = GeneralLlm(

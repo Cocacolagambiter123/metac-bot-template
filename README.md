@@ -2,13 +2,13 @@
 
 ## How this fork differs from the Metaculus template
 
-- **Models:** Claude Opus 5.5 at high reasoning effort makes the forecasts (5 per question, combined into one), and Claude Haiku 5.5 does side tasks such as turning answers into numbers. See `pick_models()` in `main.py`. A Claude Console key (`ANTHROPIC_API_KEY`) is used if set, otherwise an OpenRouter key. The repository variables `FORECAST_MODEL` and `HELPER_MODEL` override the models.
+- **Models:** Claude Opus 5.5 at high reasoning effort makes the forecasts (5 per question, combined into one), and Claude Haiku 5.5 does side tasks such as turning answers into numbers. See `pick_models()` in `main.py`. A Claude Console key (`ANTHROPIC_API_KEY`) is used if set, otherwise an OpenRouter key. The repository variables `FORECAST_MODEL` and `HELPER_MODEL` override the models, and `FORECAST_EFFORT` (`low`, `medium`, `high`, `xhigh` or `max`) changes how hard the forecasting model thinks.
 - **Nothing forecasts live until you switch it on:** the scheduled workflows only run when the repository variable `RUN_TOURNAMENT_BOT` (live bot tournaments) or `RUN_CUP_BOT` (Metaculus Cup practice) is `true`. Starting a workflow by hand with "Run workflow" always works, and **Test Bot** only forecasts in the unscored practice tournament.
 - **Choosing tournaments:** the repository variable `BOT_TOURNAMENTS` takes a comma-separated list of tournament IDs or slugs. If it's empty, the bot uses the current FutureEval season and MiniBench.
 - **Reliability:** if news research fails, the bot still forecasts. If any question fails, the run is marked as failed in the Actions tab, with a plain message when a spending limit or the credits ran out. Every prompt states the Metaculus convention that a question was undecided when it opened.
 
 **Secrets** (Settings → Secrets and variables → Actions → Secrets): `METACULUS_TOKEN`, `ANTHROPIC_API_KEY`, `ASKNEWS_API_KEY`.
-**Variables** (same page, Variables tab): `RUN_TOURNAMENT_BOT`, `RUN_CUP_BOT`, `BOT_TOURNAMENTS`, `FORECAST_MODEL`, `HELPER_MODEL`, all optional.
+**Variables** (same page, Variables tab): `RUN_TOURNAMENT_BOT`, `RUN_CUP_BOT`, `BOT_TOURNAMENTS`, `FORECAST_MODEL`, `FORECAST_EFFORT`, `HELPER_MODEL`, all optional.
 
 ## About the template
 

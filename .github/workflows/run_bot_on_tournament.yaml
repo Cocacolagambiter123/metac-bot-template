@@ -50,5 +50,6 @@ jobs:
           ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
           # Optional settings, stored as repository variables (not secrets):
           BOT_TOURNAMENTS: ${{ vars.BOT_TOURNAMENTS }} # e.g. "fall-futureeval-2026" to leave MiniBench out
-          FORECAST_MODEL: ${{ vars.FORECAST_MODEL }} # e.g. "anthropic/claude-sonnet-5-5"
+          FORECAST_MODEL: ${{ vars.FORECAST_MODEL }} # e.g. "anthropic/claude-fable-5-1"
           HELPER_MODEL: ${{ vars.HELPER_MODEL }}
+          FORECAST_EFFORT: ${{ vars.FORECAST_EFFORT }} # low, medium, high (default), xhigh or max
