@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import logging
+import os
+import sys
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -9,6 +11,9 @@ import dotenv
 # Runtime helpers (env validation, banners, dependency-warning suppression).
 from bot_helpers import (
     check_environment,
+    exit_if_any_failed,
+    has_asknews_key,
+    has_real_env,
     print_run_summary_banner,
     print_startup_banner,
     silence_noisy_dependencies,
@@ -43,6 +48,84 @@ from forecasting_tools import (
 
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
+
+
+def pick_models() -> dict[str, str | GeneralLlm]:
+    """
+    Choose the AI models based on which API key is set.
+
+    - ANTHROPIC_API_KEY (a key from the Claude Console) is used first.
+    - OPENROUTER_API_KEY (e.g. the free credits Metaculus hands out) is the fallback.
+
+    The forecasts themselves use Claude Opus 5.5 at high reasoning effort: in
+    Metaculus's spring 2026 benchmark, high-reasoning versions beat their
+    standard versions in all 8 model pairs tested. A cheap model (Claude Haiku
+    5.5) handles the side tasks: turning answers into numbers and summarising.
+
+    Set FORECAST_MODEL or HELPER_MODEL (litellm model names, e.g.
+    "anthropic/claude-sonnet-5-5") to override either choice without editing code.
+    """
+    if has_real_env("ANTHROPIC_API_KEY"):
+        forecast_model = "anthropic/claude-opus-5-5"
+        helper_model = "anthropic/claude-haiku-5-5"
+    elif has_real_env("OPENROUTER_API_KEY"):
+        forecast_model = "openrouter/anthropic/claude-opus-5.5"
+        helper_model = "openrouter/anthropic/claude-haiku-5.5"
+    else:
+        forecast_model = ""
+        helper_model = ""
+    forecast_model = os.getenv("FORECAST_MODEL", "").strip() or forecast_model
+    helper_model = os.getenv("HELPER_MODEL", "").strip() or helper_model
+    if not forecast_model or not helper_model:
+        print(
+            "❌  No model chosen. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY, "
+            "or set both FORECAST_MODEL and HELPER_MODEL."
+        )
+        sys.exit(1)
+
+    # Current Claude models reject the `temperature` setting, so none is sent.
+    # Thinking counts towards max_tokens, so leave plenty of room for it.
+    forecaster = GeneralLlm(
+        model=forecast_model,
+        reasoning_effort="high",
+        max_tokens=16000,
+        timeout=600,
+        allowed_tries=3,
+    )
+    helper = GeneralLlm(
+        model=helper_model,
+        max_tokens=8000,
+        timeout=180,
+        allowed_tries=3,
+    )
+    if has_asknews_key():
+        researcher: str | GeneralLlm = "asknews/news-summaries"
+    else:
+        # check_environment() has already warned that forecasts will be made
+        # without news research until an AskNews key is added.
+        researcher = "no_research"
+    return {
+        "default": forecaster,
+        "summarizer": helper,
+        "researcher": researcher,
+        "parser": helper,
+    }
+
+
+def tournaments_to_forecast(client: MetaculusClient) -> list[str | int]:
+    """
+    The tournaments 'tournament' mode forecasts on.
+
+    By default these are the current FutureEval season and MiniBench. Set the
+    BOT_TOURNAMENTS variable to a comma-separated list of tournament IDs or slugs
+    (e.g. "fall-futureeval-2026" to leave MiniBench out, or the new season's ID
+    when it starts) to change this without editing code.
+    """
+    raw = os.getenv("BOT_TOURNAMENTS", "").strip()
+    if not raw:
+        return [client.CURRENT_AI_COMPETITION_ID, client.CURRENT_MINIBENCH_ID]
+    ids = [part.strip() for part in raw.split(",") if part.strip()]
+    return [int(part) if part.isdigit() else part for part in ids]
 
 
 class FallTemplateBot2026(ForecastBot):
@@ -130,38 +213,48 @@ class FallTemplateBot2026(ForecastBot):
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
-            research = ""
             researcher = self.get_llm("researcher")
-
             prompt = self._get_research_prompt(question, researcher)
-
-            if isinstance(researcher, GeneralLlm):
-                research = await researcher.invoke(prompt)
-            elif (
-                researcher == "asknews/news-summaries"
-                or researcher == "asknews/deep-research/low-depth"
-                or researcher == "asknews/deep-research/medium-depth"
-                or researcher == "asknews/deep-research/high-depth"
-            ):
-                research = await AskNewsSearcher().call_preconfigured_version(
-                    researcher, prompt
+            try:
+                research = await self._call_researcher(researcher, prompt)
+            except Exception as error:
+                # A failed news search should not cost us the whole question
+                # (missed questions are expensive), so forecast without it.
+                logger.warning(
+                    f"Research failed for URL {question.page_url}, so it will be "
+                    f"forecast without news research. Error: {error}"
                 )
-            elif researcher.startswith("smart-searcher"):
-                model_name = researcher.removeprefix("smart-searcher/")
-                searcher = SmartSearcher(
-                    model=model_name,
-                    temperature=0,
-                    num_searches_to_run=2,
-                    num_sites_per_search=10,
-                    use_advanced_filters=False,
-                )
-                research = await searcher.invoke(prompt)
-            elif not researcher or researcher == "None" or researcher == "no_research":
                 research = ""
-            else:
-                research = await self.get_llm("researcher", "llm").invoke(prompt)
             logger.info(f"Found Research for URL {question.page_url}:\n{research}")
             return research
+
+    async def _call_researcher(
+        self, researcher: str | GeneralLlm, prompt: str
+    ) -> str:
+        if isinstance(researcher, GeneralLlm):
+            return await researcher.invoke(prompt)
+        if (
+            researcher == "asknews/news-summaries"
+            or researcher == "asknews/deep-research/low-depth"
+            or researcher == "asknews/deep-research/medium-depth"
+            or researcher == "asknews/deep-research/high-depth"
+        ):
+            return await AskNewsSearcher().call_preconfigured_version(
+                researcher, prompt
+            )
+        if researcher.startswith("smart-searcher"):
+            model_name = researcher.removeprefix("smart-searcher/")
+            searcher = SmartSearcher(
+                model=model_name,
+                temperature=0,
+                num_searches_to_run=2,
+                num_sites_per_search=10,
+                use_advanced_filters=False,
+            )
+            return await searcher.invoke(prompt)
+        if not researcher or researcher == "None" or researcher == "no_research":
+            return ""
+        return await self.get_llm("researcher", "llm").invoke(prompt)
 
     @staticmethod
     def _get_research_prompt(
@@ -208,6 +301,8 @@ class FallTemplateBot2026(ForecastBot):
             {question.resolution_criteria}
 
             {question.fine_print}
+
+            {self._metaculus_conventions(question)}
 
 
             Your research assistant says:
@@ -278,6 +373,8 @@ class FallTemplateBot2026(ForecastBot):
             {question.resolution_criteria}
 
             {question.fine_print}
+
+            {self._metaculus_conventions(question)}
 
 
             Your research assistant says:
@@ -355,6 +452,8 @@ class FallTemplateBot2026(ForecastBot):
             {question.resolution_criteria}
 
             {question.fine_print}
+
+            {self._metaculus_conventions(question)}
 
             Units for answer: {question.unit_of_measure if question.unit_of_measure else "Not stated (please infer this)"}
 
@@ -451,6 +550,8 @@ class FallTemplateBot2026(ForecastBot):
             {question.resolution_criteria}
 
             {question.fine_print}
+
+            {self._metaculus_conventions(question)}
 
             Your research assistant says:
             {research}
@@ -670,6 +771,23 @@ class FallTemplateBot2026(ForecastBot):
             """
         )
 
+    def _metaculus_conventions(self, question: MetaculusQuestion) -> str:
+        """
+        Metaculus questions assume the outcome was still undecided when the
+        question opened. One bot maker reported losing 90 points in spring 2026
+        by not telling their bot this, so every forecasting prompt includes it.
+        """
+        opened = ""
+        if question.open_time is not None:
+            opened = f" It opened at {question.open_time.isoformat(timespec='minutes')}."
+        return clean_indents(
+            f"""
+            Metaculus convention: treat this question as undecided at the moment it opened.{opened}
+            If your research seems to show the outcome is already settled, check the dates: news from before the question opened does not settle it, because the question would not have been asked about something already decided.
+            Always give a full forecast, even when you think the outcome is close to certain.
+            """
+        )
+
     def _get_conditional_disclaimer_if_necessary(
         self, question: MetaculusQuestion
     ) -> str:
@@ -704,9 +822,10 @@ if __name__ == "__main__":
     publish_to_metaculus = True
     print_startup_banner(run_mode, will_publish=publish_to_metaculus)
 
-    # Configure the bot. The `llms=` block below is commented out to use
-    # whichever default models forecasting-tools picks based on your env vars;
-    # uncomment and edit to pin specific models.
+    # Configure the bot. The models are pinned in pick_models() above, because
+    # forecasting-tools' built-in defaults are old models (e.g. GPT-4o) that
+    # scored below zero in recent FutureEval seasons. Keep 5 forecasts per
+    # question: bot makers who cut this to save money reported it backfired.
     template_bot = FallTemplateBot2026(
         research_reports_per_question=1,
         predictions_per_research_report=5,
@@ -715,17 +834,7 @@ if __name__ == "__main__":
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o",
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        llms=pick_models(),
     )
 
     # Per-mode tournament URL shown in the summary banner footer. These
@@ -742,17 +851,19 @@ if __name__ == "__main__":
     # summary printers below.
     client = MetaculusClient()
     if run_mode == "tournament":
-        seasonal_tournament_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
+        tournaments = tournaments_to_forecast(client)
+        print(f"🗂️   Tournaments: {', '.join(str(t) for t in tournaments)}\n")
+        if os.getenv("BOT_TOURNAMENTS", "").strip():
+            TOURNAMENT_URLS["tournament"] = (
+                f"https://www.metaculus.com/tournament/{tournaments[0]}/"
             )
-        )
-        minibench_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_MINIBENCH_ID, return_exceptions=True
+        forecast_reports = []
+        for tournament_id in tournaments:
+            forecast_reports += asyncio.run(
+                template_bot.forecast_on_tournament(
+                    tournament_id, return_exceptions=True
+                )
             )
-        )
-        forecast_reports = seasonal_tournament_reports + minibench_reports
     elif run_mode == "metaculus_cup":
         # The Metaculus Cup may be uninitialized near the start of a season
         # (Jan/May/Sep). MetaculusClient.ACX_2025_TOURNAMENT = 32564 and
@@ -781,3 +892,6 @@ if __name__ == "__main__":
         will_publish=publish_to_metaculus,
         tournament_url=TOURNAMENT_URLS.get(run_mode),
     )
+    # Mark the run as failed (red in GitHub Actions) if any question failed,
+    # so problems such as a used-up spending limit don't go unnoticed.
+    exit_if_any_failed(forecast_reports)

@@ -31,6 +31,18 @@ def _is_real_env(name: str) -> bool:
     return bool(val and val.strip() and val.strip() not in _PLACEHOLDER_ENV_VALUES)
 
 
+def has_real_env(name: str) -> bool:
+    """True if the environment variable is set to a real (non-placeholder) value."""
+    return _is_real_env(name)
+
+
+def has_asknews_key() -> bool:
+    """True if AskNews news search is configured (API key, or client ID + secret)."""
+    return _is_real_env("ASKNEWS_API_KEY") or (
+        _is_real_env("ASKNEWS_CLIENT_ID") and _is_real_env("ASKNEWS_SECRET")
+    )
+
+
 def silence_noisy_dependencies() -> None:
     """
     Quiet warnings from transitive deps that fire on import and confuse new
@@ -78,6 +90,15 @@ def check_environment(strict: bool = True) -> None:
             "ANTHROPIC_API_KEY (free OpenRouter credits: "
             "https://forms.gle/aQdYMq9Pisrf1v7d8). The Metaculus LLM proxy that "
             "the bot used to fall back to is no longer available."
+        )
+
+    if not has_asknews_key():
+        # Not fatal: the bot still forecasts, but without news research, which
+        # scored noticeably worse in Metaculus's comparisons.
+        print(
+            "⚠️   No AskNews key (ASKNEWS_API_KEY) is set, so the bot will forecast "
+            "without news research. Free AskNews access for bot makers: "
+            "https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/\n"
         )
 
     if problems:
@@ -135,6 +156,11 @@ def print_run_summary_banner(
         for r in valid:
             note = f"  (with {len(r.errors)} minor error(s))" if r.errors else ""
             print(f"  ✅ {r.question.page_url}{note}")
+        costs = [r.price_estimate for r in valid if r.price_estimate]
+        if costs:
+            # An estimate: it leaves out failed questions and any model the
+            # cost tracker doesn't have prices for.
+            print(f"\n  💵 Estimated AI cost of these forecasts: ${sum(costs):.2f}")
         if will_publish and tournament_url:
             print(f"\n  Tournament: {tournament_url}")
 
@@ -148,3 +174,52 @@ def print_run_summary_banner(
 
     print(banner)
     print()
+
+
+# Phrases the AI providers use when a spending limit is hit or credits run out.
+_SPENDING_LIMIT_PHRASES = (
+    "api usage limit",  # Claude Console: your own spend limit, or the tier's monthly cap
+    "enforced_spend_limit_reached",
+    "credit balance is too low",  # Claude Console: prepaid credits used up
+    "insufficient credits",  # OpenRouter
+    "requires more credits",  # OpenRouter
+)
+
+
+def _exception_texts(exc: BaseException, seen: set[int] | None = None) -> list[str]:
+    """The messages of an exception and of every exception it wraps."""
+    seen = set() if seen is None else seen
+    if id(exc) in seen:
+        return []
+    seen.add(id(exc))
+    texts = [f"{type(exc).__name__}: {exc}"]
+    for inner in (exc.__cause__, exc.__context__):
+        if inner is not None:
+            texts += _exception_texts(inner, seen)
+    for inner in getattr(exc, "exceptions", None) or []:  # ExceptionGroup members
+        if isinstance(inner, BaseException):
+            texts += _exception_texts(inner, seen)
+    return texts
+
+
+def exit_if_any_failed(forecast_reports: Sequence[Any]) -> None:
+    """
+    Exit with a non-zero status if any question failed, so the GitHub Actions
+    run shows as failed instead of quietly succeeding. If the cause looks like a
+    spending limit or empty credit balance, say so plainly.
+    """
+    failures = [r for r in forecast_reports if isinstance(r, BaseException)]
+    if not failures:
+        return
+    all_text = "\n".join(
+        text for exc in failures for text in _exception_texts(exc)
+    ).lower()
+    if any(phrase in all_text for phrase in _SPENDING_LIMIT_PHRASES):
+        print(
+            "💸  The AI provider refused requests because a spending limit was "
+            "reached or the credits ran out. Raise the limit or add credits "
+            "(Claude Console: https://platform.claude.com/settings/billing). "
+            "Later runs will retry the missed questions while they're still open."
+        )
+    print(f"❌  {len(failures)} question(s) failed, so this run is marked as failed.")
+    sys.exit(1)

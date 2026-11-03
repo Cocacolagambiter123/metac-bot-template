@@ -11,9 +11,14 @@ concurrency:
   cancel-in-progress: false
 
 
-# Daily job to run the simple forecast bot
+# Forecasts on the live bot tournaments (FutureEval + MiniBench by default).
 jobs:
   forecast_job:
+    # Off until you switch it on, so nothing forecasts in a scored tournament
+    # by accident: set the repository variable RUN_TOURNAMENT_BOT to true
+    # (Settings -> Secrets and variables -> Actions -> Variables). Starting it
+    # by hand with "Run workflow" always works.
+    if: vars.RUN_TOURNAMENT_BOT == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
     steps: # sets up the steps that will be run in order
       # setup repository with all necessary dependencies - keep as is
@@ -42,3 +47,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          # Optional settings, stored as repository variables (not secrets):
+          BOT_TOURNAMENTS: ${{ vars.BOT_TOURNAMENTS }} # e.g. "fall-futureeval-2026" to leave MiniBench out
+          FORECAST_MODEL: ${{ vars.FORECAST_MODEL }} # e.g. "anthropic/claude-sonnet-5-5"
+          HELPER_MODEL: ${{ vars.HELPER_MODEL }}

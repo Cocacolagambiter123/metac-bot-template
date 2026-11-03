@@ -1,4 +1,17 @@
 # Simple Metaculus forecasting bot
+
+## How this fork differs from the Metaculus template
+
+- **Models:** Claude Opus 5.5 at high reasoning effort makes the forecasts (5 per question, combined into one), and Claude Haiku 5.5 does side tasks such as turning answers into numbers. See `pick_models()` in `main.py`. A Claude Console key (`ANTHROPIC_API_KEY`) is used if set, otherwise an OpenRouter key. The repository variables `FORECAST_MODEL` and `HELPER_MODEL` override the models.
+- **Nothing forecasts live until you switch it on:** the scheduled workflows only run when the repository variable `RUN_TOURNAMENT_BOT` (live bot tournaments) or `RUN_CUP_BOT` (Metaculus Cup practice) is `true`. Starting a workflow by hand with "Run workflow" always works, and **Test Bot** only forecasts in the unscored practice tournament.
+- **Choosing tournaments:** the repository variable `BOT_TOURNAMENTS` takes a comma-separated list of tournament IDs or slugs. If it's empty, the bot uses the current FutureEval season and MiniBench.
+- **Reliability:** if news research fails, the bot still forecasts. If any question fails, the run is marked as failed in the Actions tab, with a plain message when a spending limit or the credits ran out. Every prompt states the Metaculus convention that a question was undecided when it opened.
+
+**Secrets** (Settings → Secrets and variables → Actions → Secrets): `METACULUS_TOKEN`, `ANTHROPIC_API_KEY`, `ASKNEWS_API_KEY`.
+**Variables** (same page, Variables tab): `RUN_TOURNAMENT_BOT`, `RUN_CUP_BOT`, `BOT_TOURNAMENTS`, `FORECAST_MODEL`, `HELPER_MODEL`, all optional.
+
+## About the template
+
 This repository contains a simple bot meant to get you started with creating your own bot for the AI Forecasting Tournament. Go to https://www.metaculus.com/futureeval/participate/ for more info and tournament rules (and then go to the  "Getting Started" section of our [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#want-to-join-the-ai-forecasting-benchmark) page).
 
 **Brand new to this?** You can get a working bot running in about 5 minutes without writing a single line of code — just fork this repo, paste two API keys into GitHub, and click "Run workflow". See **[Quick start](#quick-start--fork-and-use-github-actions)** below.
