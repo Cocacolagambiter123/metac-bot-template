@@ -36,6 +36,7 @@ from numeric_model.matching import (  # noqa: E402
     ProposedMatch,
     QuestionInfo,
     anchor_text,
+    build_matching_prompt,
     match_question,
     parse_matching_answer,
     units_compatible,
@@ -263,6 +264,14 @@ class MatchQuestionTest(unittest.TestCase):
                                  window_start=None, reference_date=None, all_time=False, scale=1,
                                  source_match="exact", reason="S&P close"))
         self.assertTrue(self.run_match(answer).accepted)
+
+    def test_group_subquestion_label_is_in_the_prompt(self) -> None:
+        # In a group question the title can be shared by every subquestion,
+        # so the label is what says which series this one is about.
+        group = sp500_question(title="What will these indices close at on December 31, 2026?", group_option="Nasdaq-100")
+        prompt = build_matching_prompt(group, TODAY)
+        self.assertIn('It is only about: "Nasdaq-100"', prompt)
+        self.assertNotIn("subquestion of a group", build_matching_prompt(sp500_question(), TODAY))
 
     def test_no_match_and_garbage(self) -> None:
         self.assertFalse(self.run_match('{"match": false}').accepted)

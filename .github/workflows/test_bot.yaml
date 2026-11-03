@@ -22,6 +22,10 @@ on:
         description: "Numeric model blend weight from 0 to 1 for this run (blank uses NUMERIC_MODEL_WEIGHT)"
         type: string
         default: ""
+      tournaments:
+        description: "For numeric_matching_check: comma-separated tournament IDs or slugs (blank = this season's FutureEval and MiniBench)"
+        type: string
+        default: ""
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -74,8 +78,9 @@ jobs:
           NUMERIC_MODEL_WEIGHT: ${{ inputs.numeric_model_weight || vars.NUMERIC_MODEL_WEIGHT }} # 0 (default) = prompt anchor only
       - name: Check numeric model matching on closed questions
         if: inputs.task == 'numeric_matching_check'
-        run: uv run python scripts/check_numeric_matching.py
+        run: uv run python scripts/check_numeric_matching.py --tournaments "$CHECK_TOURNAMENTS"
         env:
+          CHECK_TOURNAMENTS: ${{ inputs.tournaments }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}

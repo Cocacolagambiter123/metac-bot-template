@@ -231,6 +231,7 @@ def question_info(question: NumericQuestion) -> QuestionInfo:
         open_time=question.open_time,
         scheduled_resolution_time=question.scheduled_resolution_time,
         page_url=question.page_url or "",
+        group_option=question.group_question_option or "",
     )
 
 

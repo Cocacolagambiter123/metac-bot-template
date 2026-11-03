@@ -54,6 +54,9 @@ class QuestionInfo:
     open_time: datetime | None = None
     scheduled_resolution_time: datetime | None = None
     page_url: str = ""
+    # For one subquestion of a group question: its label, e.g. "Nasdaq-100"
+    # in a group about several indices. The title alone may not say which.
+    group_option: str = ""
 
 
 @dataclass(frozen=True)
@@ -109,13 +112,18 @@ def build_matching_prompt(question: QuestionInfo, today: date) -> str:
         if question.scheduled_resolution_time
         else "unknown"
     )
+    subquestion = (
+        f'\nThis is one subquestion of a group of related questions. It is only about: "{question.group_option}". Match only that subquestion; the title and background may describe the whole group.'
+        if question.group_option
+        else ""
+    )
     return f"""
 You decide whether a forecasting question is about one of a fixed list of data series from FRED (the St. Louis Fed's data site). Your answer is checked by a program, so follow the format exactly.
 
 Available series:
 {menu}
 
-Question: {question.title}
+Question: {question.title}{subquestion}
 Background: {question.background}
 Resolution criteria: {question.resolution_criteria}
 Fine print: {question.fine_print}
@@ -255,7 +263,7 @@ def verify_match(
         reject(f"the question resolves on a proxy for {proposal.series_id}, not the series itself")
         return result
     text = " ".join(
-        (question.title, question.resolution_criteria, question.fine_print)
+        (question.title, question.group_option, question.resolution_criteria, question.fine_print)
     ).lower()
     for word in _UNSUPPORTED_WORDS:
         if word in text:
