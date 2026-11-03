@@ -8,6 +8,10 @@ It prints the search phrases and how many results each found, the questions
 chosen and how they resolved, and how the question itself resolved. That shows
 whether Metaculus's search works and whether the choices are useful.
 
+Metaculus only shows an account the outcomes of questions it has forecast, so
+the lookup (like the live bot) searches only the bot's own past questions.
+Until the bot has forecast questions that later resolved, this finds nothing.
+
 It submits nothing and never looks at open questions: tuning a bot on open
 questions in a scored tournament breaks Metaculus's "no human in the loop"
 rule.

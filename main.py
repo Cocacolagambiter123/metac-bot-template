@@ -251,6 +251,10 @@ def similar_questions_enabled() -> bool:
     Whether to add similar questions that have already resolved on Metaculus
     to the research (see similar_questions.py). Set USE_SIMILAR_QUESTIONS to
     "true" to turn it on; it is off by default until it has been validated.
+
+    Metaculus only shows a bot the resolutions of questions it has forecast,
+    so this finds nothing until the bot has forecast questions that later
+    resolved, and it grows more useful as that history builds up.
     """
     return os.getenv("USE_SIMILAR_QUESTIONS", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -327,6 +331,17 @@ def past_question(question: MetaculusQuestion) -> PastQuestion | None:
     )
 
 
+_own_user_id: int | None = None
+
+
+def _metaculus_user_id() -> int:
+    """The bot's own Metaculus user id, looked up once per run."""
+    global _own_user_id
+    if _own_user_id is None:
+        _own_user_id = MetaculusClient().get_current_user_id()
+    return _own_user_id
+
+
 def _search_resolved_blocking(query: str, limit: int) -> list[MetaculusQuestion]:
     # forecasting-tools makes blocking web requests, so this runs in a thread
     # with its own event loop, leaving the bot's loop free for other questions.
@@ -339,6 +354,10 @@ def _search_resolved_blocking(query: str, limit: int) -> list[MetaculusQuestion]
                 other_url_parameters={
                     "search": query,
                     "limit": limit,
+                    # Only questions this bot has forecast: Metaculus withholds
+                    # the resolution of any other question (its API gateway
+                    # rules, documented in Metaculus PR #5261).
+                    "forecaster_id": _metaculus_user_id(),
                     # Forecast histories aren't needed and make replies much bigger.
                     "with_cp": "false",
                     "include_conditional_cps": "false",

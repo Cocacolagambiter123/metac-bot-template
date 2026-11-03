@@ -16,6 +16,15 @@ Once per question:
 4. Their resolutions are looked up and the list is added to the research.
    Counts such as "4 of 6 resolved Yes" are worked out here, not by the AI.
 
+Metaculus only shows an account the resolution of a question it has forecast
+(or of questions in projects it has been given access to); for any other
+question the API returns the resolution, description and resolution criteria
+as null (its API gateway rules, documented in Metaculus PR #5261). So main.py
+searches only questions the bot itself has forecast. The list grows as the
+bot's own forecasts resolve: recurring questions in MiniBench and FutureEval
+resolve within days or weeks, so earlier versions of the same question soon
+become available.
+
 Anything that goes wrong just means a shorter list or none: this must never
 cost a question.
 
