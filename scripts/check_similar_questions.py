@@ -46,6 +46,24 @@ def words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z]{3,}", text.lower())}
 
 
+def raw_resolution_fields(post_id: int) -> str:
+    """What the API returns about a post's resolution, to explain a missing one."""
+    found = MetaculusClient().get_question_by_post_id(post_id)
+    post = found.api_json if not isinstance(found, list) else found[0].api_json
+    questions = [post["question"]] if post.get("question") else list(
+        (post.get("group_of_questions") or {}).get("questions", [])
+    )
+    shown = {
+        key: post.get(key) for key in ("status", "resolved", "curation_status") if key in post
+    }
+    for i, question in enumerate(questions[:2]):
+        shown[f"question[{i}]"] = {
+            key: value for key, value in question.items()
+            if "resol" in key or key in ("status", "actual_close_time", "type")
+        }
+    return str(shown)
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tournaments", default="")
@@ -72,6 +90,7 @@ async def main() -> int:
 
     ask = pick_models()["parser"].invoke
     blocks: list[str] = []
+    explained_missing = False
     with_similar = 0
     total_similar = 0
     hit_count = 0
@@ -84,11 +103,18 @@ async def main() -> int:
             searches.append((query, hits))
             return hits
 
+        lookups: list[tuple[PastQuestion, PastQuestion | None]] = []
+
+        async def resolve(candidate: PastQuestion) -> PastQuestion | None:
+            result = await resolve_past_question(candidate)
+            lookups.append((candidate, result))
+            return result
+
         opened = question.open_time or question.published_time or now
         as_of = opened.date() - timedelta(days=1)
         try:
             similar = await find_similar_questions(
-                target_question(question), ask, search, resolve_past_question, as_of
+                target_question(question), ask, search, resolve, as_of
             )
         except Exception as error:
             blocks.append(f"ERROR  {question.question_text}: {error}")
@@ -101,6 +127,15 @@ async def main() -> int:
             hit_count += len(hits)
             relevant_hits += len(shared)
             lines.append(f"  search {query!r}: {len(hits)} results, {len(shared)} sharing a word with the search")
+        missing = [c for c, r in lookups if r is None or r.resolution is None]
+        if lookups:
+            lines.append(f"  chosen: {len(lookups)} needed their resolution looked up, {len(missing)} had none")
+        if missing and not explained_missing and missing[0].post_id is not None:
+            explained_missing = True
+            try:
+                lines.append(f"  API fields for {missing[0].url}: {raw_resolution_fields(missing[0].post_id)}")
+            except Exception as error:
+                lines.append(f"  couldn't fetch {missing[0].url}: {error}")
         if similar:
             with_similar += 1
             total_similar += len(similar)

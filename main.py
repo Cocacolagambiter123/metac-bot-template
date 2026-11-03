@@ -356,16 +356,24 @@ async def search_resolved_questions(query: str, limit: int = 20) -> list[PastQue
     return [p for p in (past_question(q) for q in found) if p is not None]
 
 
+# Posts fetched in this run, by post id. Similar questions often share a post
+# (e.g. one group question for several periods), and each Metaculus request
+# waits about 4 seconds, so each post is fetched only once.
+_fetched_posts: dict[int, list[MetaculusQuestion]] = {}
+
+
 async def resolve_past_question(past: PastQuestion) -> PastQuestion | None:
     """Fetches a question on its own to get the resolution a question list left out."""
     if past.resolution is not None:
         return past
     if past.post_id is None:
         return None
-    found = await asyncio.to_thread(
-        MetaculusClient().get_question_by_post_id, past.post_id, "unpack_subquestions"
-    )
-    for question in found if isinstance(found, list) else [found]:
+    if past.post_id not in _fetched_posts:
+        found = await asyncio.to_thread(
+            MetaculusClient().get_question_by_post_id, past.post_id, "unpack_subquestions"
+        )
+        _fetched_posts[past.post_id] = found if isinstance(found, list) else [found]
+    for question in _fetched_posts[past.post_id]:
         if question.id_of_question == past.question_id and question.resolution_string is not None:
             return past_question(question)
     return None
