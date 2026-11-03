@@ -54,3 +54,5 @@ jobs:
           HELPER_MODEL: ${{ vars.HELPER_MODEL }}
           FORECAST_EFFORT: ${{ vars.FORECAST_EFFORT }} # low, medium, high (default), xhigh or max
           MAX_CONCURRENT_AI_CALLS: ${{ vars.MAX_CONCURRENT_AI_CALLS }} # default 4; raise it as your AI account's limits grow
+          USE_NUMERIC_MODEL: ${{ vars.USE_NUMERIC_MODEL }} # "true" to use the numeric model; off by default
+          NUMERIC_MODEL_WEIGHT: ${{ vars.NUMERIC_MODEL_WEIGHT }} # 0 (default) = prompt anchor only; up to 1 = blend

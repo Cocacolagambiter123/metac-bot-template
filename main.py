@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import dotenv
+import numpy as np
 
 # Runtime helpers (env validation, banners, dependency-warning suppression).
 from bot_helpers import (
@@ -31,6 +32,7 @@ from forecasting_tools import (
     MultipleChoiceQuestion,
     NumericDistribution,
     NumericQuestion,
+    DiscreteQuestion,
     DateQuestion,
     DatePercentile,
     Percentile,
@@ -44,6 +46,14 @@ from forecasting_tools import (
     SmartSearcher,
     clean_indents,
     structure_output,
+)
+
+from numeric_model.blend import blend_cdfs
+from numeric_model.matching import (
+    MatchResult,
+    QuestionInfo,
+    anchor_text,
+    match_question,
 )
 
 dotenv.load_dotenv()
@@ -181,6 +191,50 @@ def tournaments_to_forecast(client: MetaculusClient) -> list[str | int]:
     return [int(part) if part.isdigit() else part for part in ids]
 
 
+def numeric_model_settings() -> tuple[bool, float]:
+    """
+    Whether to use the statistical model for numeric questions about known
+    data series (see numeric_model/), and how much weight to give it.
+
+    - USE_NUMERIC_MODEL: "true" to turn it on. Off by default until it has
+      been validated.
+    - NUMERIC_MODEL_WEIGHT: 0 to 1, default 0. At 0 the model's forecast is
+      only shown to the AI in the prompt, as a starting point. Above 0 the
+      final distribution is also a mixture: this share from the model, the
+      rest from the AI.
+    """
+    use = os.getenv("USE_NUMERIC_MODEL", "").strip().lower() in ("1", "true", "yes", "on")
+    raw = os.getenv("NUMERIC_MODEL_WEIGHT", "").strip()
+    try:
+        weight = float(raw) if raw else 0.0
+    except ValueError:
+        weight = -1.0
+    if not 0.0 <= weight <= 1.0:
+        print(f"❌  NUMERIC_MODEL_WEIGHT must be a number from 0 to 1 (got {raw!r}).")
+        sys.exit(1)
+    return use, weight
+
+
+def question_info(question: NumericQuestion) -> QuestionInfo:
+    """The fields of a forecasting-tools question that the numeric model needs."""
+    return QuestionInfo(
+        title=question.question_text,
+        background=question.background_info or "",
+        resolution_criteria=question.resolution_criteria or "",
+        fine_print=question.fine_print or "",
+        unit_of_measure=question.unit_of_measure or "",
+        lower_bound=float(question.lower_bound),
+        upper_bound=float(question.upper_bound),
+        open_lower_bound=question.open_lower_bound,
+        open_upper_bound=question.open_upper_bound,
+        is_discrete=isinstance(question, DiscreteQuestion),
+        open_time=question.open_time,
+        scheduled_resolution_time=question.scheduled_resolution_time,
+        page_url=question.page_url or "",
+        group_option=question.group_question_option or "",
+    )
+
+
 class FallTemplateBot2026(ForecastBot):
     """
     This is the template bot for the Fall 2026 FutureEval Bot Tournament.
@@ -263,6 +317,9 @@ class FallTemplateBot2026(ForecastBot):
     _research_limiter_loop: asyncio.AbstractEventLoop | None = None
     _research_limiter_semaphore: asyncio.Semaphore | None = None
     _structure_output_validation_samples = 2
+    # One numeric-model match per question, shared by its 5 forecasts.
+    _numeric_matches: dict[str, MatchResult] = {}
+    _numeric_match_locks: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
 
     ##################################### RESEARCH #####################################
 
@@ -521,6 +578,12 @@ class FallTemplateBot2026(ForecastBot):
         upper_bound_message, lower_bound_message = (
             self._create_upper_and_lower_bound_messages(question)
         )
+        match = await self._numeric_model_match(question)
+        anchor = ""
+        if match is not None and match.accepted:
+            anchor = "Statistical model:\n" + anchor_text(
+                match, question.unit_of_measure or ""
+            )
         prompt = clean_indents(
             f"""
             You are a professional forecaster interviewing for a job.
@@ -541,6 +604,8 @@ class FallTemplateBot2026(ForecastBot):
 
             Your research assistant says:
             {research}
+
+            {anchor}
 
             Today is {datetime.now().strftime("%Y-%m-%d")}.
 
@@ -574,7 +639,87 @@ class FallTemplateBot2026(ForecastBot):
             "
             """
         )
-        return await self._numeric_prompt_to_forecast(question, prompt)
+        prediction = await self._numeric_prompt_to_forecast(question, prompt)
+        if match is not None and match.accepted:
+            prediction = self._blend_with_numeric_model(question, prediction, match)
+        return prediction
+
+    async def _numeric_model_match(
+        self, question: NumericQuestion
+    ) -> MatchResult | None:
+        """
+        Matches the question to a known data series, once per question (the
+        5 forecasts share the result). None if USE_NUMERIC_MODEL is off.
+        """
+        use, _ = numeric_model_settings()
+        if not use:
+            return None
+        key = str(question.id_of_question or question.page_url or question.question_text)
+        loop = asyncio.get_running_loop()
+        held = self._numeric_match_locks.get(key)
+        if held is None or held[0] is not loop:
+            held = (loop, asyncio.Lock())
+            self._numeric_match_locks[key] = held
+        async with held[1]:
+            if key not in self._numeric_matches:
+                helper = self.get_llm("parser", "llm")
+                try:
+                    match = await match_question(
+                        question_info(question),
+                        helper.invoke,
+                        as_of=datetime.now(timezone.utc).date(),
+                    )
+                except Exception as error:
+                    # The model is optional: never let it cost us the question.
+                    match = MatchResult(accepted=False, reasons=[f"matching failed: {error}"])
+                logger.info(f"{match.describe()} (URL {question.page_url})")
+                self._numeric_matches[key] = match
+            return self._numeric_matches[key]
+
+    def _blend_with_numeric_model(
+        self,
+        question: NumericQuestion,
+        prediction: ReasonedPrediction[NumericDistribution],
+        match: MatchResult,
+    ) -> ReasonedPrediction[NumericDistribution]:
+        """
+        Mixes the AI's distribution with the model's, if NUMERIC_MODEL_WEIGHT
+        is above 0. Falls back to the AI's forecast if anything goes wrong.
+        """
+        _, weight = numeric_model_settings()
+        if weight <= 0:
+            return prediction
+        try:
+            ai_cdf = prediction.prediction_value.get_cdf()
+            grid = np.array([point.value for point in ai_cdf])
+            heights = np.array([point.percentile for point in ai_cdf])
+            blended = blend_cdfs(
+                heights,
+                grid,
+                match.scaled_samples,
+                weight,
+                question.open_lower_bound,
+                question.open_upper_bound,
+            )
+            distribution = NumericDistribution.from_question(
+                [
+                    Percentile(value=float(value), percentile=float(height))
+                    for value, height in zip(grid, blended)
+                ],
+                question,
+            )
+            distribution.get_cdf()  # validate now, so a failure falls back below
+        except Exception as error:
+            logger.warning(
+                f"Couldn't blend with the numeric model for URL {question.page_url}, "
+                f"so the AI's forecast is used alone. Error: {error}"
+            )
+            return prediction
+        reasoning = (
+            f"{prediction.reasoning}\n\nThe final distribution mixes this forecast "
+            f"({1 - weight:.0%}) with the statistical model's ({weight:.0%})."
+        )
+        return ReasonedPrediction(prediction_value=distribution, reasoning=reasoning)
 
     async def _numeric_prompt_to_forecast(
         self,
@@ -901,6 +1046,12 @@ if __name__ == "__main__":
     run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
 
     check_environment(strict=True)
+    use_numeric_model, numeric_model_weight = numeric_model_settings()
+    if use_numeric_model:
+        print(
+            "📈  Numeric model on for questions about known data series "
+            f"(blend weight {numeric_model_weight:g}).\n"
+        )
     publish_to_metaculus = True
     print_startup_banner(run_mode, will_publish=publish_to_metaculus)
 
